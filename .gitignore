@@ -12,3 +12,5 @@
 
 # End of https://www.gitignore.io/api/jupyternotebook
 
+*/saved_models/
+*/logs
