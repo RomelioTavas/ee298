@@ -22,14 +22,11 @@ class CycleGAN():
         self.gf = 32
         self.df = 64
 
-        self.train_steps = 40000
         self.latent_size = self.config.audio_length
         self.model_name = 'cyclegan_audio'
-        self.batch_size = 8
 
         # Loss weights
         self.lambda_cycle = 10.0                    # Cycle-consistency loss
-        self.lambda_id = 0.1 * self.lambda_cycle    # Identity loss
 
     def build_model(self):
         optimizer = Adam(0.0002, 0.5)
@@ -76,9 +73,6 @@ class CycleGAN():
         # Translate audios back to original domain
         reconstr_A = self.g_BA(fake_B)
         reconstr_B = self.g_AB(fake_A)
-        # Identity mapping of audios
-        audio_A_id = self.g_BA(audio_A)
-        audio_B_id = self.g_AB(audio_B)
 
         # For the combined model we will only train the generators
         self.d_A.trainable = False
@@ -91,15 +85,11 @@ class CycleGAN():
         # Combined model trains generators to fool discriminators
         self.combined = Model(inputs=[audio_A, audio_B],
                               outputs=[valid_A, valid_B,
-                                       reconstr_A, reconstr_B,
-                                       audio_A_id, audio_B_id])
+                                       reconstr_A, reconstr_B])
         print("Compiling Adversarial Network")
         self.combined.compile(loss=['mse', 'mse',
-                                    'mae', 'mae',
                                     'mae', 'mae'],
-                              loss_weights=[1, 1,
-                                            self.lambda_cycle, self.lambda_cycle,
-                                            self.lambda_id, self.lambda_id],
+                              loss_weights=[1, 1, self.lambda_cycle, self.lambda_cycle],
                               optimizer=optimizer)
         print("CycleGAN: ")
         self.combined.summary()
@@ -202,7 +192,6 @@ class CycleGAN():
                 # print("Training combined")
                 g_loss = self.combined.train_on_batch([audios_A, audios_B],
                                                       [valid, valid,
-                                                       audios_A, audios_B,
                                                        audios_A, audios_B])
 
                 # # Plot the progress
@@ -212,19 +201,17 @@ class CycleGAN():
                     tf.Summary.Value(tag="D acc", simple_value=100*d_loss[1]),
                     tf.Summary.Value(tag="G loss", simple_value=g_loss[0]),
                     tf.Summary.Value(tag="G adv", simple_value=np.mean(g_loss[1:3])),
-                    tf.Summary.Value(tag="G recon", simple_value=np.mean(g_loss[3:5])),
-                    tf.Summary.Value(tag="G id", simple_value=np.mean(g_loss[5:6]))
+                    tf.Summary.Value(tag="G recon", simple_value=np.mean(g_loss[3:5]))
                 ]
                 summary = tf.Summary(value=summary_values)
                 writer.add_summary(summary)
-                print("[Epoch %d/%d] [Batch %d/%d] [D loss: %f, acc: %3d%%] [G loss: %05f, adv: %05f, recon: %05f, id: %05f] time: %s "
+                print("[Epoch %d/%d] [Batch %d/%d] [D loss: %f, acc: %3d%%] [G loss: %05f, adv: %05f, recon: %05f] time: %s "
                       % (epoch + 1, epochs,
                           batch_i, self.data_loader.n_batches,
                           d_loss[0], 100*d_loss[1],
                           g_loss[0],
                           np.mean(g_loss[1:3]),
                           np.mean(g_loss[3:5]),
-                          np.mean(g_loss[5:6]),
                           elapsed_time))
 
                 # If at save interval => save generated audio samples
