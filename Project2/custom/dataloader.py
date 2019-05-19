@@ -65,3 +65,12 @@ class DataLoader():
                 audios_B[i, ] = audio_B
 
             yield audios_A, audios_B
+
+    def load(self, path):
+        input_length = self.config.audio_length
+        audios = np.empty((1, input_length, 1))
+        audio, _ = librosa.core.load(path, sr=self.config.sampling_rate, res_type='kaiser_fast')
+        audio = self.clip_audio(audio)
+        audio = self.normalize_audio(audio)[:, np.newaxis]
+        audios[0, ] = audio
+        return audios
