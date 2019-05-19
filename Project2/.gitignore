@@ -1,3 +1,4 @@
 IRMAS-TrainingData
 __pycache__
 checkpoints
+generated/*.wav
