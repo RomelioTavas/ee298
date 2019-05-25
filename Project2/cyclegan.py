@@ -1,12 +1,13 @@
+import os
 import numpy as np
-
 import datetime
 import tensorflow as tf
+import librosa
 
 from keras.layers import (Conv1D, Dense, Dropout, Input, Concatenate,
                           LeakyReLU, Flatten, UpSampling1D)
 from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
-from keras.optimizers import Adam
+from keras.optimizers import RMSprop
 from keras.models import Model
 
 np.random.seed(1001)
@@ -22,27 +23,31 @@ class CycleGAN():
         self.gf = 32
         self.df = 64
 
-        self.latent_size = self.config.audio_length
+        self.dataset_name = 'IRMAS-pia-2-gac'
         self.model_name = 'cyclegan_audio'
+        self.timestamp = datetime.datetime.now()
 
         # Loss weights
         self.lambda_cycle = 10.0                    # Cycle-consistency loss
 
     def build_model(self):
-        optimizer = Adam(0.0002, 0.5)
+        lr = 2e-4
+        decay = 6e-8
+
+        d_optimizer = RMSprop(lr, decay)
 
         # Build and compile the discriminators
         self.d_A = self.build_discriminator()
-        self.d_B = self.build_discriminator()
         self.d_A.compile(loss='mse',
-                         optimizer=optimizer,
+                         optimizer=d_optimizer,
                          metrics=['accuracy'])
 
         print("d_A: ")
         self.d_A.summary()
 
+        self.d_B = self.build_discriminator()
         self.d_B.compile(loss='mse',
-                         optimizer=optimizer,
+                         optimizer=d_optimizer,
                          metrics=['accuracy'])
 
         print("d_B: ")
@@ -87,10 +92,11 @@ class CycleGAN():
                               outputs=[valid_A, valid_B,
                                        reconstr_A, reconstr_B])
         print("Compiling Adversarial Network")
+        c_optimizer = RMSprop(lr=lr*0.5, decay=decay*0.5)
         self.combined.compile(loss=['mse', 'mse',
                                     'mae', 'mae'],
                               loss_weights=[1, 1, self.lambda_cycle, self.lambda_cycle],
-                              optimizer=optimizer)
+                              optimizer=c_optimizer)
         print("CycleGAN: ")
         self.combined.summary()
 
@@ -112,7 +118,7 @@ class CycleGAN():
         d4 = d_layer(d3, self.df*8)
         
         x = Flatten()(d4)
-        out = Dense(1)(x)
+        out = Dense(1, activation='sigmoid')(x)
 
         return Model(audio, out)
 
@@ -158,17 +164,22 @@ class CycleGAN():
     def train(self, epochs, batch_size=1, sample_interval=50):
 
         start_time = datetime.datetime.now()
+        
+        # Make directory for checkpoints
+        self.checkpoint_dir = 'checkpoints/%s-16khz-%s' % (self.dataset_name, self.timestamp)
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
         writer = tf.summary.FileWriter("./logs/cyclegan_{}".format(datetime.datetime.now()))
         # Adversarial loss ground truths
         valid = np.ones((batch_size,))
         fake = np.zeros((batch_size,))
         
-        for epoch in range(epochs):
+        for epoch, _ in enumerate(range(epochs), start=1):
             for batch_i, (audios_A, audios_B) in enumerate(self.data_loader.load_batch(batch_size)):
                 # ----------------------
                 #  Train Discriminators
                 # ----------------------
-                # Translate images to opposite domain
+                # Translate audio samples to opposite domain
                 fake_B = self.g_AB.predict(audios_A)
                 fake_A = self.g_BA.predict(audios_B)
 
@@ -189,33 +200,57 @@ class CycleGAN():
                 # ------------------
 
                 # Train the generators
-                # print("Training combined")
                 g_loss = self.combined.train_on_batch([audios_A, audios_B],
                                                       [valid, valid,
                                                        audios_A, audios_B])
 
-                # # Plot the progress
+                # Plot the progress
                 elapsed_time = datetime.datetime.now() - start_time
                 summary_values = [
                     tf.Summary.Value(tag="D loss", simple_value=d_loss[0]),
-                    tf.Summary.Value(tag="D acc", simple_value=100*d_loss[1]),
+                    tf.Summary.Value(tag="D acc", simple_value=d_loss[1]),
                     tf.Summary.Value(tag="G loss", simple_value=g_loss[0]),
                     tf.Summary.Value(tag="G adv", simple_value=np.mean(g_loss[1:3])),
                     tf.Summary.Value(tag="G recon", simple_value=np.mean(g_loss[3:5]))
                 ]
                 summary = tf.Summary(value=summary_values)
                 writer.add_summary(summary)
-                print("[Epoch %d/%d] [Batch %d/%d] [D loss: %f, acc: %3d%%] [G loss: %05f, adv: %05f, recon: %05f] time: %s "
-                      % (epoch + 1, epochs,
+                print("[Epoch %d/%d] [Batch %d/%d] [D loss: %f, acc: %f] [G loss: %05f, adv: %05f, recon: %05f] time: %s "
+                      % (epoch, epochs,
                           batch_i, self.data_loader.n_batches,
-                          d_loss[0], 100*d_loss[1],
+                          d_loss[0], d_loss[1],
                           g_loss[0],
                           np.mean(g_loss[1:3]),
                           np.mean(g_loss[3:5]),
                           elapsed_time))
-
                 # If at save interval => save generated audio samples
-                # if batch_i % sample_interval == 0:
-                #     self.sample_audio(epoch, batch_i)
-            self.g_AB.save("cyclegan_A2B_epoch_{}.h5".format(epoch))
-            self.g_BA.save("cyclegan_B2A_epoch_{}.h5".format(epoch))
+                if batch_i % sample_interval == 0:
+                    self.sample_audio(epoch, batch_i)
+
+            # Save models every epoch
+            self.g_AB.save("%s/g_AB-epoch-%s.h5" % (self.checkpoint_dir, epoch))
+            self.g_BA.save("%s/g_BA-epoch-%s.h5" % (self.checkpoint_dir, epoch))
+            self.d_A.save("%s/d_A-epoch-%s.h5" % (self.checkpoint_dir, epoch))
+            self.d_B.save("%s/d_B-epoch-%s.h5" % (self.checkpoint_dir, epoch))
+            self.combined.save("%s/combined-epoch-%s.h5" % (self.checkpoint_dir, epoch))
+    
+    def sample_audio(self, epoch, batch_i):
+        # Create output_path if it does not exist
+        output_path = 'outputs/%s/%s/epoch-%s' % (self.dataset_name, self.timestamp, epoch)
+        os.makedirs(output_path, exist_ok=True)
+
+        audios_A = self.data_loader.load('IRMAS-TrainingData/pia/[pia][pop_roc]1537__1.wav')
+        audios_B = self.data_loader.load('IRMAS-TrainingData/gac/[gac][pop_roc]0720__1.wav')
+
+        # Translate images to the other domain
+        fake_B = self.g_AB.predict(audios_A)
+        fake_A = self.g_BA.predict(audios_B)
+        # Translate back to original domain
+        reconstr_A = self.g_BA.predict(fake_B)
+        reconstr_B = self.g_AB.predict(fake_A)
+
+        librosa.output.write_wav('%s/fake_B_batch-%s.wav' % (output_path, batch_i), fake_B[0], 16000)
+        librosa.output.write_wav('%s/fake_A_batch-%s.wav' % (output_path, batch_i), fake_A[0], 16000)
+
+        librosa.output.write_wav('%s/reconstr_A_batch-%s.wav' % (output_path, batch_i), reconstr_A[0], 16000)
+        librosa.output.write_wav('%s/reconstr_B_batch-%s.wav' % (output_path, batch_i), reconstr_B[0], 16000)
